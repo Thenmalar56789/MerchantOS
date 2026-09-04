@@ -1,175 +1,185 @@
-import os
 import json
-from pathlib import Path
-from dotenv import load_dotenv
-from openai import OpenAI
+import ollama
 
-from tools import search_products, get_product, get_merchant_policy
+from tools import (
+    search_products,
+    get_product,
+    get_merchant_policy
+)
+
 from decision_engine import evaluate_decision
-
-
-# Load environment variables
-ROOT_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT_DIR / ".env")
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 SYSTEM_PROMPT = """
 You are MerchantOS, an AI merchant agent.
 
-Your job is to help a merchant convert legitimate customer purchase intent
-into profitable purchases while respecting merchant policies.
+Your job is to help merchants convert customer purchase intent into
+profitable purchases while respecting merchant-defined business policies.
 
-You can:
-1. Search the merchant catalogue.
-2. Inspect a specific product.
-3. Read merchant policies.
-4. Evaluate a proposed discount using deterministic guardrails.
-
-IMPORTANT:
-- Never invent products, prices, inventory, discounts, or policies.
-- Always use catalogue data.
-- Never bypass merchant policies.
-- Never directly approve a discount without the decision engine.
-- The decision engine is the final authority for discount safety.
+RULES:
+- Never invent products, prices, inventory, or policies.
+- Use only catalogue data returned by tools.
 - Never expose cost price to the customer.
-- If an action violates a policy, explain why and reject or clarify.
-- Keep decisions concise and commercially useful.
+- Never claim a policy passed unless the Python guardrail result says so.
+- Never bypass merchant policies.
+- Prefer products that satisfy the customer's requirements.
+- Give a concise final recommendation.
 
-Your decision should contain:
-- selected product
-- recommended action
-- discount
-- final price
-- reasoning
-- guardrail result
+The Python application is the final authority for merchant safety.
 """
 
 
-def run_merchant_agent(user_intent: str):
-
-    tools = [
-        {
-            "type": "function",
+tools = [
+    {
+        "type": "function",
+        "function": {
             "name": "search_products",
-            "description": "Search the merchant's product catalogue.",
+            "description": "Search the merchant product catalogue.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
-                        "type": ["string", "null"],
-                        "description": "Product or category search query."
+                        "type": "string",
+                        "description": "Product, brand, ingredient, or category."
                     },
                     "max_price": {
-                        "type": ["number", "null"],
+                        "type": "number",
                         "description": "Maximum customer-facing price."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of products to return."
+                        "description": "Maximum products to return."
                     }
                 },
-                "required": ["query", "max_price", "limit"],
-                "additionalProperties": False
+                "required": ["query", "max_price", "limit"]
             }
+        }
+    }
+]
+
+
+def run_merchant_agent(user_intent):
+
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
         },
         {
-            "type": "function",
-            "name": "get_product",
-            "description": "Get complete internal information for one product.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "product_id": {
-                        "type": "string"
-                    }
-                },
-                "required": ["product_id"],
-                "additionalProperties": False
-            }
-        },
-        {
-            "type": "function",
-            "name": "get_merchant_policy",
-            "description": "Get the merchant's business policies.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False
-            }
+            "role": "user",
+            "content": user_intent
         }
     ]
 
-    response = client.responses.create(
-        model="gpt-5.6-luna",
-        instructions=SYSTEM_PROMPT,
-        input=user_intent,
-        tools=tools
-    )
-
-    # Process tool calls
     while True:
 
-        tool_calls = [
-            item for item in response.output
-            if item.type == "function_call"
-        ]
+        response = ollama.chat(
+            model="llama3.2",
+            messages=messages,
+            tools=tools
+        )
+
+        assistant_message = response["message"]
+
+        messages.append(assistant_message)
+
+        tool_calls = assistant_message.get("tool_calls", [])
 
         if not tool_calls:
-            break
+            return assistant_message.get(
+                "content",
+                "I could not produce a verified recommendation."
+            )
 
-        tool_outputs = []
+        for tool_call in tool_calls:
 
-        for call in tool_calls:
+            function = tool_call["function"]
 
-            arguments = json.loads(call.arguments)
+            tool_name = function["name"]
+            arguments = function.get("arguments", {})
 
-            if call.name == "search_products":
-                result = search_products(
+            print(f"\n[Agent Tool Call] {tool_name}")
+
+            if tool_name == "search_products":
+
+                products = search_products(
                     query=arguments.get("query"),
                     max_price=arguments.get("max_price"),
                     limit=arguments.get("limit", 10)
                 )
 
-            elif call.name == "get_product":
-                result = get_product(
-                    arguments["product_id"]
+                policy = get_merchant_policy()
+
+                print("[System] Merchant policy loaded")
+
+                verified_products = []
+
+                for product in products:
+
+                    decision = evaluate_decision(
+                        product=product,
+                        policy=policy,
+                        proposed_discount=0
+                    )
+
+                    if decision["approved"]:
+
+                        verified_products.append({
+                            "id": product["id"],
+                            "name": product["name"],
+                            "brand": product.get("brand"),
+                            "category": product.get("category"),
+                            "price": product["price"],
+                            "inventory": product["inventory"],
+                            "discountPercent": 0,
+                            "finalPrice": decision["finalPrice"],
+                            "marginPercent": decision["marginPercent"],
+                            "guardrailResult": "passed"
+                        })
+
+                    else:
+
+                        print(
+                            f"[Guardrail blocked] "
+                            f"{product['name']}: "
+                            f"{decision['violations']}"
+                        )
+
+                result = {
+                    "customer_request": user_intent,
+                    "merchant_policy_verified": True,
+                    "verified_products": verified_products
+                }
+
+                print(
+                    f"[System] Guardrails passed for "
+                    f"{len(verified_products)} products"
                 )
 
-            elif call.name == "get_merchant_policy":
-                result = get_merchant_policy()
-
-            else:
-                result = {"error": "Unknown tool"}
-
-            tool_outputs.append({
-                "type": "function_call_output",
-                "call_id": call.call_id,
-                "output": json.dumps(result)
-            })
-
-        response = client.responses.create(
-            model="gpt-5.6-luna",
-            instructions=SYSTEM_PROMPT,
-            previous_response_id=response.id,
-            input=tool_outputs,
-            tools=tools
-        )
-
-    return response.output_text
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": json.dumps(result)
+                    }
+                )
 
 
 if __name__ == "__main__":
 
-    print("\nMerchantOS AI Agent")
-    print("------------------")
+    print("\n================================")
+    print("      MerchantOS AI Agent")
+    print("================================")
 
-    intent = input(
+    user_intent = input(
         "\nCustomer intent: "
     )
 
-    result = run_merchant_agent(intent)
+    print("\nAgent is thinking...\n")
 
-    print("\nAgent Decision:")
+    result = run_merchant_agent(user_intent)
+
+    print("\n================================")
+    print("        AGENT DECISION")
+    print("================================")
+
     print(result)
