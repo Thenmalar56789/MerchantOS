@@ -1,13 +1,9 @@
 import json
 import ollama
 
-from tools import (
-    search_products,
-    get_product,
-    get_merchant_policy
-)
-
+from tools import search_products, get_merchant_policy
 from decision_engine import evaluate_decision
+from intent_parser import parse_intent
 
 
 SYSTEM_PROMPT = """
@@ -16,152 +12,143 @@ You are MerchantOS, an AI merchant agent.
 Your job is to help merchants convert customer purchase intent into
 profitable purchases while respecting merchant-defined business policies.
 
-RULES:
+Rules:
+- Use only verified catalogue data.
 - Never invent products, prices, inventory, or policies.
-- Use only catalogue data returned by tools.
-- Never expose cost price to the customer.
-- Never claim a policy passed unless the Python guardrail result says so.
-- Never bypass merchant policies.
+- Never expose cost price.
+- Never claim a product passed unless Python guardrails verified it.
+- Respect the customer's requirements.
+- Respect the customer's maximum price.
 - Prefer products that satisfy the customer's requirements.
 - Give a concise final recommendation.
-
-The Python application is the final authority for merchant safety.
 """
 
 
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_products",
-            "description": "Search the merchant product catalogue.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Product, brand, ingredient, or category."
-                    },
-                    "max_price": {
-                        "type": "number",
-                        "description": "Maximum customer-facing price."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum products to return."
-                    }
-                },
-                "required": ["query", "max_price", "limit"]
-            }
-        }
-    }
-]
+def run_merchant_agent(customer_message):
 
+    # ---------------------------------------------
+    # STEP 1: Parse customer purchase intent
+    # ---------------------------------------------
 
-def run_merchant_agent(user_intent):
+    intent = parse_intent(customer_message)
 
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT
-        },
-        {
-            "role": "user",
-            "content": user_intent
-        }
-    ]
+    print("\n[Intent Parser]")
+    print(json.dumps(
+        intent,
+        indent=2,
+        ensure_ascii=False
+    ))
 
-    while True:
+    # ---------------------------------------------
+    # STEP 2: Search merchant catalogue
+    # ---------------------------------------------
 
-        response = ollama.chat(
-            model="llama3.2",
-            messages=messages,
-            tools=tools
+    products = search_products(
+        query=intent["product"],
+        max_price=intent["maxPrice"],
+        limit=10
+    )
+
+    print(
+        f"\n[Catalogue] Found {len(products)} candidate products"
+    )
+
+    # ---------------------------------------------
+    # STEP 3: Load merchant policy
+    # ---------------------------------------------
+
+    policy = get_merchant_policy()
+
+    print("[System] Merchant policy loaded")
+
+    # ---------------------------------------------
+    # STEP 4: Deterministic guardrails
+    # ---------------------------------------------
+
+    verified_products = []
+
+    for product in products:
+
+        decision = evaluate_decision(
+            product=product,
+            policy=policy,
+            proposed_discount=0
         )
 
-        assistant_message = response["message"]
+        if decision["approved"]:
 
-        messages.append(assistant_message)
+            verified_products.append({
+                "id": product["id"],
+                "name": product["name"],
+                "brand": product.get("brand"),
+                "category": product.get("category"),
+                "price": product["price"],
+                "inventory": product["inventory"],
+                "marginPercent": decision["marginPercent"],
+                "guardrailResult": "passed"
+            })
 
-        tool_calls = assistant_message.get("tool_calls", [])
+        else:
 
-        if not tool_calls:
-            return assistant_message.get(
-                "content",
-                "I could not produce a verified recommendation."
+            print(
+                f"[Guardrail blocked] "
+                f"{product['name']}"
             )
 
-        for tool_call in tool_calls:
+    print(
+        f"[System] Guardrails passed for "
+        f"{len(verified_products)} products"
+    )
 
-            function = tool_call["function"]
+    # ---------------------------------------------
+    # STEP 5: Let LLM choose from verified products
+    # ---------------------------------------------
 
-            tool_name = function["name"]
-            arguments = function.get("arguments", {})
+    if not verified_products:
 
-            print(f"\n[Agent Tool Call] {tool_name}")
+        return (
+            "I couldn't find a product that satisfies both "
+            "your requirements and the merchant's policies."
+        )
 
-            if tool_name == "search_products":
+    prompt = f"""
+Customer request:
+{customer_message}
 
-                products = search_products(
-                    query=arguments.get("query"),
-                    max_price=arguments.get("max_price"),
-                    limit=arguments.get("limit", 10)
-                )
+Parsed intent:
+{json.dumps(intent, ensure_ascii=False)}
 
-                policy = get_merchant_policy()
+Verified products:
+{json.dumps(verified_products, ensure_ascii=False)}
 
-                print("[System] Merchant policy loaded")
+Choose the best product for the customer.
 
-                verified_products = []
+Customer requirements:
+{intent["requirements"]}
 
-                for product in products:
+Important:
+- Only choose from the verified products.
+- Do not invent information.
+- Do not mention internal cost price or internal margin.
+- Stay within the customer's maximum price.
+- Explain briefly why the selected product fits.
+"""
 
-                    decision = evaluate_decision(
-                        product=product,
-                        policy=policy,
-                        proposed_discount=0
-                    )
+    response = ollama.chat(
+        model="llama3.2",
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    )
 
-                    if decision["approved"]:
-
-                        verified_products.append({
-                            "id": product["id"],
-                            "name": product["name"],
-                            "brand": product.get("brand"),
-                            "category": product.get("category"),
-                            "price": product["price"],
-                            "inventory": product["inventory"],
-                            "discountPercent": 0,
-                            "finalPrice": decision["finalPrice"],
-                            "marginPercent": decision["marginPercent"],
-                            "guardrailResult": "passed"
-                        })
-
-                    else:
-
-                        print(
-                            f"[Guardrail blocked] "
-                            f"{product['name']}: "
-                            f"{decision['violations']}"
-                        )
-
-                result = {
-                    "customer_request": user_intent,
-                    "merchant_policy_verified": True,
-                    "verified_products": verified_products
-                }
-
-                print(
-                    f"[System] Guardrails passed for "
-                    f"{len(verified_products)} products"
-                )
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "content": json.dumps(result)
-                    }
-                )
+    return response["message"]["content"]
 
 
 if __name__ == "__main__":
@@ -170,13 +157,15 @@ if __name__ == "__main__":
     print("      MerchantOS AI Agent")
     print("================================")
 
-    user_intent = input(
+    customer_message = input(
         "\nCustomer intent: "
     )
 
     print("\nAgent is thinking...\n")
 
-    result = run_merchant_agent(user_intent)
+    result = run_merchant_agent(
+        customer_message
+    )
 
     print("\n================================")
     print("        AGENT DECISION")
