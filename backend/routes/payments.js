@@ -90,9 +90,25 @@ router.post("/verify", async (req, res) => {
                 )
                 .digest("hex");
 
+        const expectedBuffer =
+            Buffer.from(
+                generatedSignature,
+                "utf8"
+            );
+
+        const receivedBuffer =
+            Buffer.from(
+                razorpay_signature,
+                "utf8"
+            );
+
         const isValid =
-            generatedSignature ===
-            razorpay_signature;
+            expectedBuffer.length ===
+                receivedBuffer.length &&
+            crypto.timingSafeEqual(
+                expectedBuffer,
+                receivedBuffer
+            );
 
         if (!isValid) {
             order.paymentStatus =
@@ -135,6 +151,10 @@ router.post("/verify", async (req, res) => {
             "Razorpay payment status:",
             razorpayPayment.status
         );
+
+        // ---------------------------------------------
+        // Captured payment required
+        // ---------------------------------------------
 
         if (
             razorpayPayment.status !==
@@ -237,7 +257,6 @@ router.post("/verify", async (req, res) => {
             );
 
         if (customer) {
-
             customer.purchaseHistory.push({
                 productId:
                     order.productId,
@@ -256,42 +275,36 @@ router.post("/verify", async (req, res) => {
         }
 
         // ---------------------------------------------
-        // Convert Purchase Intent
+        // Convert EXACT Purchase Intent
         // ---------------------------------------------
 
-        const purchaseIntent =
-            await PurchaseIntent.findOne({
-                customerMessage: {
-                    $exists: true
-                },
+        let purchaseIntent = null;
 
-                status: {
-                    $ne: "converted"
-                }
-            }).sort({
-                createdAt: -1
-            });
+        if (order.purchaseIntentId) {
 
-        if (purchaseIntent) {
+            purchaseIntent =
+                await PurchaseIntent.findById(
+                    order.purchaseIntentId
+                );
 
-            purchaseIntent.status =
-                "converted";
+            if (
+                purchaseIntent &&
+                purchaseIntent.status !==
+                    "converted"
+            ) {
+                purchaseIntent.status =
+                    "converted";
 
-            purchaseIntent.convertedOrderId =
-                order._id;
+                purchaseIntent.convertedOrderId =
+                    order._id;
 
-            await purchaseIntent.save();
+                await purchaseIntent.save();
 
-            console.log(
-                "Purchase intent converted:",
-                purchaseIntent._id.toString()
-            );
-
-        } else {
-
-            console.log(
-                "No unconverted purchase intent found"
-            );
+                console.log(
+                    "Purchase intent converted:",
+                    purchaseIntent._id.toString()
+                );
+            }
         }
 
         // ---------------------------------------------
@@ -344,6 +357,11 @@ router.post("/verify", async (req, res) => {
 
                 inventoryRemaining:
                     product.inventory,
+
+                purchaseIntentId:
+                    order.purchaseIntentId
+                        ? order.purchaseIntentId.toString()
+                        : null,
 
                 purchaseIntentConverted:
                     Boolean(

@@ -22,11 +22,13 @@ if not MONGODB_URI:
 sys.path.append(str(Path(__file__).resolve().parent))
 
 from services.catalogue_service import load_catalogue
+from services.catalogue_validator import validate_product
 
 
 def calculate_merchant_data(index):
     """
     Merchant-controlled commercial data.
+
     In a real merchant system, these values would come
     from the merchant's inventory/pricing system.
     """
@@ -60,19 +62,34 @@ def calculate_merchant_data(index):
         3
     ]
 
-    price = selling_prices[index % len(selling_prices)]
+    price = selling_prices[
+        index % len(selling_prices)
+    ]
 
-    cost_percentage = cost_percentages[index % len(cost_percentages)]
-    cost_price = round(price * cost_percentage, 2)
+    cost_percentage = cost_percentages[
+        index % len(cost_percentages)
+    ]
 
-    inventory = inventory_values[index % len(inventory_values)]
+    cost_price = round(
+        price * cost_percentage,
+        2
+    )
+
+    inventory = inventory_values[
+        index % len(inventory_values)
+    ]
 
     margin = round(
         ((price - cost_price) / price) * 100,
         2
     )
 
-    return price, cost_price, inventory, margin
+    return (
+        price,
+        cost_price,
+        inventory,
+        margin
+    )
 
 
 def main():
@@ -81,7 +98,9 @@ def main():
 
     catalogue = load_catalogue()
 
-    print(f"Found {len(catalogue)} products")
+    print(
+        f"Found {len(catalogue)} products"
+    )
 
     client = MongoClient(MONGODB_URI)
     db = client["merchantos"]
@@ -97,14 +116,23 @@ def main():
     merchant = {
         "name": "MerchantOS Demo Store",
         "category": "Skincare",
-        "description": "AI-powered skincare merchant for agentic commerce",
+        "description": (
+            "AI-powered skincare merchant "
+            "for agentic commerce"
+        ),
         "currency": "INR"
     }
 
-    merchant_result = db.merchants.insert_one(merchant)
+    merchant_result = db.merchants.insert_one(
+        merchant
+    )
+
     merchant_id = merchant_result.inserted_id
 
-    print("Created merchant:", merchant["name"])
+    print(
+        "Created merchant:",
+        merchant["name"]
+    )
 
     # Merchant policy
     policy = {
@@ -119,48 +147,131 @@ def main():
     db.policies.insert_one(policy)
 
     inserted = 0
+    rejected = 0
+
+    validation_errors = {}
 
     for index, product in enumerate(catalogue):
 
-        if not product["name"] or not product["name"].strip():
+        if (
+            not product.get("name")
+            or not product["name"].strip()
+        ):
+            rejected += 1
+
+            validation_errors.setdefault(
+                "empty_name",
+                0
+            )
+
+            validation_errors[
+                "empty_name"
+            ] += 1
+
             continue
 
-        price, cost_price, inventory, margin = calculate_merchant_data(index)
+        price, cost_price, inventory, margin = (
+            calculate_merchant_data(index)
+        )
 
         mongo_product = {
             "merchantId": merchant_id,
 
             "name": product["name"].strip(),
 
-            "category": product["category"] or "Skincare",
+            "category": (
+                product.get("category")
+                or "Skincare"
+            ),
 
-            "description": product["ingredients"] or "",
+            "description": (
+                product.get("ingredients")
+                or ""
+            ),
 
             # Merchant-controlled selling price
             "price": price,
 
             # Merchant-private business data
             "costPrice": cost_price,
+
             "margin": margin,
+
             "inventory": inventory,
 
             "attributes": {
-                "brand": product["brand"],
-                "barcode": product["barcode"],
-                "ingredients": product["ingredients"],
+                "brand": (
+                    product.get("brand")
+                    or "Unknown Brand"
+                ),
 
-                # Important for explaining our data architecture
-                "source": "Open Beauty Facts API",
+                "barcode": product.get(
+                    "barcode"
+                ),
+
+                "ingredients": product.get(
+                    "ingredients"
+                ),
+
+                # Public catalogue provenance
+                "source": (
+                    "Open Beauty Facts API"
+                ),
+
                 "sourceLicense": "ODbL",
-                "sourceURL": "https://world.openbeautyfacts.org/",
-                "publicRetailPriceUSD": product["priceUSD"],
-                "merchantPriceSource": "demo_merchant_data"
+
+                "sourceURL": (
+                    "https://world.openbeautyfacts.org/"
+                ),
+
+                # Open Beauty Facts does not provide
+                # the merchant's selling price.
+                "publicRetailPriceUSD": (
+                    product.get("priceUSD")
+                ),
+
+                # Explicit separation between
+                # public catalogue data and
+                # merchant-controlled economics.
+                "merchantPriceSource": (
+                    "demo_merchant_data"
+                )
             },
 
             "active": True
         }
 
-        db.products.insert_one(mongo_product)
+        # ------------------------------------------------
+        # Validate the FINAL merchant product record
+        # before inserting it into MongoDB.
+        # ------------------------------------------------
+
+        validation = validate_product(
+            mongo_product
+        )
+
+        if not validation["verified"]:
+
+            rejected += 1
+
+            for violation in validation[
+                "violations"
+            ]:
+
+                validation_errors.setdefault(
+                    violation,
+                    0
+                )
+
+                validation_errors[
+                    violation
+                ] += 1
+
+            continue
+
+        db.products.insert_one(
+            mongo_product
+        )
 
         inserted += 1
 
@@ -168,8 +279,41 @@ def main():
     print("================================")
     print("MerchantOS catalogue imported!")
     print("================================")
-    print(f"Products inserted : {inserted}")
-    print("Merchant policy   : created")
+
+    print(
+        f"Catalogue records : {len(catalogue)}"
+    )
+
+    print(
+        f"Products verified : {inserted}"
+    )
+
+    print(
+        f"Products rejected : {rejected}"
+    )
+
+    print(
+        f"Validation rate   : "
+        f"{(
+            inserted / len(catalogue) * 100
+        ) if catalogue else 0:.2f}%"
+    )
+
+    print(
+        "Merchant policy   : created"
+    )
+
+    if validation_errors:
+
+        print()
+        print("Validation issues:")
+        
+        for error, count in validation_errors.items():
+
+            print(
+                f"  - {error}: {count}"
+            )
+
     print()
 
 
