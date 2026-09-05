@@ -1,9 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-app = FastAPI(title="MerchantOS AI Agent")
+from agent import evaluate_purchase
 
-# Allow our React frontend and Node backend to communicate with this service
+
+app = FastAPI(
+    title="MerchantOS AI Agent"
+)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -11,6 +17,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class AgentRequest(BaseModel):
+    message: str
 
 
 @app.get("/")
@@ -26,3 +36,14 @@ def health():
     return {
         "status": "healthy"
     }
+
+
+@app.post("/agent/recommend")
+def agent_recommend(
+    request: AgentRequest
+):
+    result = evaluate_purchase(
+        request.message
+    )
+
+    return result

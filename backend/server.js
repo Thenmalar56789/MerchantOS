@@ -3,6 +3,10 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const path = require("path");
 const dotenv = require("dotenv");
+const agentRoutes = require("./routes/agent");
+const orderRoutes = require("./routes/orders");
+const paymentRoutes = require("./routes/payments");
+const dashboardRoutes = require("./routes/dashboard");
 
 dotenv.config({
     path: path.resolve(__dirname, "../.env")
@@ -12,6 +16,10 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use("/api/agent", agentRoutes);
+app.use("/api/orders", orderRoutes);
+app.use("/api/payments", paymentRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 
 app.get("/", (req, res) => {
     res.json({

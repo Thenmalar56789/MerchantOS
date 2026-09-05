@@ -20,6 +20,12 @@ const orderSchema = new mongoose.Schema(
             required: true
         },
 
+        purchaseIntentId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "PurchaseIntent",
+            default: null
+        },
+
         quantity: {
             type: Number,
             default: 1
@@ -48,8 +54,25 @@ const orderSchema = new mongoose.Schema(
 
         orderStatus: {
             type: String,
-            enum: ["created", "confirmed", "processing", "shipped", "delivered", "cancelled"],
+            enum: [
+                "created",
+                "confirmed",
+                "processing",
+                "shipped",
+                "delivered",
+                "cancelled"
+            ],
             default: "created"
+        },
+
+        razorpayOrderId: {
+            type: String,
+            unique: true,
+            sparse: true
+        },
+
+        razorpayPaymentId: {
+            type: String
         },
 
         aiAssisted: {
@@ -57,7 +80,12 @@ const orderSchema = new mongoose.Schema(
             default: false
         }
     },
-    { timestamps: true }
+    {
+        timestamps: true
+    }
 );
 
-module.exports = mongoose.model("Order", orderSchema);
+module.exports = mongoose.model(
+    "Order",
+    orderSchema
+);
