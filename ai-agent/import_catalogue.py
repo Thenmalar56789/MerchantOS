@@ -150,7 +150,9 @@ def main():
                 "ingredients": product["ingredients"],
 
                 # Important for explaining our data architecture
-                "source": "INCIDB",
+                "source": "Open Beauty Facts API",
+                "sourceLicense": "ODbL",
+                "sourceURL": "https://world.openbeautyfacts.org/",
                 "publicRetailPriceUSD": product["priceUSD"],
                 "merchantPriceSource": "demo_merchant_data"
             },
